@@ -1,236 +1,187 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+
+import { useEffect, useState, useRef } from "react";
+import { SecureAuth } from "../modules/auth.js";
+import QRCode from 'qrcode';
 
 const uuid = typeof window !== "undefined" ? window.crypto.randomUUID() : "";
 
 export default function LoginPage() {
-  const wsRef = useRef(null);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [logs, setLogs] = useState([]);
+  const lastMessageTypeRef = useRef("");
   const [connected, setConnected] = useState(false);
   const [loginUser, setLoginUser] = useState("");
-
-  function log(msg) {
-    setLogs((prev) => [...prev, msg]);
-  }
-
-  async function fetchWsUrl() {
-    try {
-      const res = await fetch(`http://localhost:3001/login/init?uuid=${uuid}`);
-      const data = await res.json();
-      if (!data.wsUrl) throw new Error("No wsUrl in response");
-      return data.wsUrl;
-    } catch (err) {
-      log(`❗ Failed to get wsUrl: ${err.message}`);
-      throw err;
-    }
-  }
+  const [status, setStatus] = useState(null);
+  const [qrSrc, setQrSrc] = useState(null);
+  const [qrValue, setQrValue] = useState(null);
+  const authRef = useRef(null);
 
   useEffect(() => {
-    let clientKeys, sharedSecret;
+    const auth = new SecureAuth("http://localhost:3001");
+    authRef.current = auth;
 
-    async function generateEphemeralKey() {
-      return await crypto.subtle.generateKey(
-        { name: "ECDH", namedCurve: "P-256" },
-        true,
-        ["deriveBits"]
-      );
-    }
-
-    async function exportPublicKey(key) {
-      const raw = await window.crypto.subtle.exportKey("spki", key);
-      const b64 = btoa(String.fromCharCode(...new Uint8Array(raw)));
-
-      const pem = `-----BEGIN PUBLIC KEY-----\n${b64
-        .match(/.{1,64}/g)
-        .join("\n")}\n-----END PUBLIC KEY-----`;
-      return pem;
-    }
-
-    async function importServerKey(base64) {
-      const raw = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
-      return await crypto.subtle.importKey(
-        "spki",
-        raw,
-        { name: "ECDH", namedCurve: "P-256" },
-        true,
-        []
-      );
-    }
-
-    async function deriveSharedSecret(privKey, pubKey) {
-      const sharedBits = await crypto.subtle.deriveBits(
-        { name: "ECDH", public: pubKey },
-        privKey,
-        256
-      );
-
-      return await crypto.subtle.importKey(
-        "raw",
-        sharedBits,
-        { name: "AES-GCM" },
-        false,
-        ["encrypt", "decrypt"]
-      );
-    }
-
-    async function connectWebSocket() {
-      try {
-        const wsUrl = await fetchWsUrl();
-        clientKeys = await generateEphemeralKey();
-        const clientPub = await exportPublicKey(clientKeys.publicKey);
-
-        const ws = new WebSocket(wsUrl);
-        wsRef.current = ws;
-
-        ws.onopen = () => {
-          log("🔌 Securely Connecting To Server...");
-          setConnected(true);
-          ws.send(
-            JSON.stringify({ type: "client-public-key", key: clientPub })
-          );
-        };
-
-        ws.onmessage = async (event) => {
-          try {
-            const data = JSON.parse(event.data);
-
-            if (data.type === "server-public-key") {
-              if (typeof data.serverPubKey !== "string") {
-                return;
-              }
-              const serverKey = await importServerKey(data.serverPubKey);
-              sharedSecret = await deriveSharedSecret(
-                clientKeys.privateKey,
-                serverKey
-              );
-              wsRef.current.sharedSecret = sharedSecret;
-              log("🔑 End-To-End Encryption Works!");
-            } else if (data.payload && data.iv && data.tag) {
-              const decryptedRaw = await decrypt(
-                data,
-                wsRef.current.sharedSecret
-              );
-              const decrypted = JSON.parse(decryptedRaw);
-
-              log("Decrypted message: " + JSON.stringify(decrypted));
-
-              if (decrypted.type === "success") {
-                setLoginUser(decrypted.username || username);
-                log(`✅ Login successful: ${decrypted.message}`);
-              }
-            } else if (data.type === "error") {
-              log(`❗ Error: ${data.message}`);
-              ws.close();
-            }
-          } catch (err) {
-            console.error("❗ Failed to handle message (full error):", err);
-            log(
-              "❗ Failed to handle message (stringified): " +
-                JSON.stringify(err)
-            );
-            log(
-              "❗ Failed to handle message (stack): " +
-                (err?.stack ?? "No stack")
-            );
-          }
-        };
-
-        ws.onerror = (err) => log("🚨 Server error");
-        ws.onclose = () => {
-          log("❌ Server - Login Portal closed, Please refresh and try again.");
+    auth.connectForLogin(
+      uuid,
+      (decrypted) => {
+        if (decrypted.type === "success") {
+          setLoginUser(decrypted.username || username);
+          setStatus(`✅ Login successful: ${decrypted.message}`);
           setConnected(false);
-        };
-      } catch (err) {
-        log(`❗ End-To-End Encryption setup failed: ${err}`);
+        } else if (decrypted.type === "error") {
+          setStatus(`❗ Error: ${decrypted.message}`);
+          setConnected(false);
+        }
+      },
+      (err) => {
+        setStatus("🚨 Server error");
+        lastMessageTypeRef.current = decrypted.type;
       }
-    }
+    );
 
-    connectWebSocket();
+    // Fetch the websocket URL (token) and create a QR image for it
+    (async () => {
+      try {
+        const wsUrl = await auth.fetchLoginWsUrl(uuid);
+        const dataUrl = await QRCode.toDataURL(wsUrl, { margin: 2, width: 240 });
+        setQrSrc(dataUrl);
+        setQrValue(wsUrl);
+      } catch (e) {
+        console.warn('Could not fetch wsUrl for QR', e);
+      }
+    })();
+
+    // Poll for shared secret and enable button only when ready
+    const poll = setInterval(() => {
+      if (auth.sharedSecret) {
+        setConnected(true);
+        setStatus("Login");
+        clearInterval(poll);
+      }
+    }, 100);
+    // Cleanup
+    return () => {
+      clearInterval(poll);
+      auth.close();
+    };
   }, []);
 
-  async function encrypt(plain, key) {
-    const enc = new TextEncoder();
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-    const encoded = enc.encode(plain);
-
-    const ciphertextWithTag = new Uint8Array(
-      await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, encoded)
-    );
-
-    const tagLength = 16;
-    const ciphertext = ciphertextWithTag.slice(0, -tagLength);
-    const tag = ciphertextWithTag.slice(-tagLength);
-
-    return {
-      iv: Buffer.from(iv).toString("hex"),
-      payload: Buffer.from(ciphertext).toString("hex"),
-      tag: Buffer.from(tag).toString("hex"),
-    };
-  }
-
-  async function decrypt({ iv, payload, tag }, key) {
-    const ivBytes = Uint8Array.from(Buffer.from(iv, "hex"));
-    const payloadBytes = Uint8Array.from(Buffer.from(payload, "hex"));
-    const tagBytes = Uint8Array.from(Buffer.from(tag, "hex"));
-
-    const fullCiphertext = new Uint8Array(
-      payloadBytes.length + tagBytes.length
-    );
-    fullCiphertext.set(payloadBytes);
-    fullCiphertext.set(tagBytes, payloadBytes.length);
-
-    const decrypted = await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: ivBytes },
-      key,
-      fullCiphertext
-    );
-
-    return new TextDecoder().decode(decrypted);
-  }
-
   async function submitLogin() {
-    if (!wsRef.current?.sharedSecret) {
-      log("🔒 Shared secret not ready");
+    if (!authRef.current?.sharedSecret) {
+      setStatus("🔒 Shared secret not ready");
       return;
     }
-
-    const creds = JSON.stringify({ type: "login", username, password, uuid });
-    const encrypted = await encrypt(creds, wsRef.current.sharedSecret);
-    wsRef.current.send(JSON.stringify(encrypted));
-    log("📤 Attempting login...");
+    await authRef.current.submitLogin(uuid, username, password);
+    setStatus("📤 Attempting login...");
   }
 
   return (
-    <div style={{ padding: 20 }}>
-      <h1>🔐 Secure Login</h1>
-      <input
-        placeholder="Username"
-        value={username}
-        onChange={(e) => setUsername(e.target.value)}
-      />
-      <br />
-      <input
-        placeholder="Password"
-        type="password"
-        value={password}
-        onChange={(e) => setPassword(e.target.value)}
-      />
-      <br />
-      <button onClick={submitLogin} disabled={!connected}>
-        Login
-      </button>
-      {loginUser && (
-        <p style={{ color: "green", fontWeight: "bold", marginTop: 10 }}>
-          ✅ Logged in successfully as <span>{loginUser}</span>
-        </p>
-      )}
-      <pre>
-        {logs.map((log, i) => (
-          <div key={i}>{log}</div>
-        ))}
-      </pre>
+    <div style={{
+      minHeight: "100vh",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      background: "linear-gradient(135deg, #e0e7ff 0%, #f0fdfa 100%)"
+    }}>
+      <div style={{
+        background: "#fff",
+        borderRadius: 16,
+        boxShadow: "0 4px 24px rgba(0,0,0,0.08)",
+        padding: "2.5rem 2rem",
+        minWidth: 340,
+        maxWidth: 760,
+        width: "100%",
+        display: 'grid',
+        gridTemplateColumns: '1fr 300px',
+        gap: 20,
+        alignItems: 'start'
+      }}>
+        <div>
+          <h1 style={{
+            textAlign: "center",
+            fontWeight: 700,
+            fontSize: "2rem",
+            marginBottom: 24,
+            color: "#2563eb"
+          }}>🔐 Secure Login</h1>
+          <div style={{ marginBottom: 18 }}>
+          <label style={{ fontWeight: 500, color: "#374151" }}>Username</label>
+          <input
+            style={{
+              width: "100%",
+              padding: "0.5rem",
+              borderRadius: 8,
+              border: "1px solid #d1d5db",
+              marginTop: 4,
+              marginBottom: 12,
+              fontSize: "1rem"
+            }}
+            placeholder="Username"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            autoFocus
+          />
+          <label style={{ fontWeight: 500, color: "#374151" }}>Password</label>
+          <input
+            style={{
+              width: "100%",
+              padding: "0.5rem",
+              borderRadius: 8,
+              border: "1px solid #d1d5db",
+              marginTop: 4,
+              marginBottom: 12,
+              fontSize: "1rem"
+            }}
+            placeholder="Password"
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+        </div>
+        <button
+          onClick={submitLogin}
+          disabled={!connected}
+          style={{
+            width: "100%",
+            padding: "0.75rem",
+            borderRadius: 8,
+            background: connected ? "#2563eb" : "#dbeafe",
+            color: connected ? "#fff" : "#6b7280",
+            fontWeight: 600,
+            fontSize: "1.1rem",
+            border: "none",
+            boxShadow: connected ? "0 2px 8px rgba(37,99,235,0.08)" : "none",
+            cursor: connected ? "pointer" : "not-allowed",
+            transition: "background 0.2s"
+          }}
+        >
+          {connected || status !== null ? status : "Connecting..."}
+        </button>
+          {loginUser && (
+            <p style={{ color: "green", fontWeight: "bold", marginTop: 18, textAlign: "center" }}>
+              ✅ Logged in successfully as <span>{loginUser}</span>
+            </p>
+          )}
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+          <div style={{ width: 240, height: 240, background: '#f8fafc', borderRadius: 12, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 12 }}>
+            {qrSrc ? (
+              <img src={qrSrc} alt="Login QR" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+            ) : (
+              <div style={{ color: '#9ca3af', textAlign: 'center' }}>QR unavailable</div>
+            )}
+          </div>
+          <div style={{ marginTop: 12, textAlign: 'center', fontSize: 12, color: '#374151' }}>
+            {qrValue ? (
+              <>
+                <div style={{ marginBottom: 6, fontWeight: 600 }}>Scan to login</div>
+              </>
+            ) : (
+              <div style={{ color: '#6b7280' }}>Waiting for token…</div>
+            )}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

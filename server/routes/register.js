@@ -14,7 +14,7 @@ export function init(req, res) {
 }
 
 export function wsHandler(ws, req) {
-  const url = new URL(req.url, `http://${req.headers.host}`);
+  const url = new URL(req.url, `https://${req.headers.host}`);
   const uuid = url.searchParams.get('uuid');
   const token = url.searchParams.get('token');
 
@@ -27,8 +27,20 @@ export function wsHandler(ws, req) {
 
   logger.info(`📝 Register WS connected for UUID ${uuid}`);
 
-  ws.on('message', (msg) => {
-    handleMessage(ws, msg.toString(), 'register');
+  ws.on('message', async (msg) => {
+    const messageStr = msg.toString();
+    logger.info(`📥 Register received message from ${uuid}: ${messageStr}`);
+    
+    try {
+      const parsedMessage = JSON.parse(messageStr);
+      logger.info(`📋 Parsed message type: ${parsedMessage.type || 'unknown'}`);
+    } catch (e) {
+      logger.info(`📋 Raw message (not JSON): ${messageStr}`);
+    }
+    
+    const result = await handleMessage(messageStr);
+    logger.info(`📤 Register sending response to ${uuid}: ${result}`);
+    ws.send(result);
   });
 
   ws.send(JSON.stringify({ status: 'register-connected' }));

@@ -1,4 +1,4 @@
-import db from './db.js';
+import { User, Token } from './db.js';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import logger from './logger.js';
@@ -25,37 +25,57 @@ export default function handleMessage(message) {
   }
 
   if (type === 'register') {
-    const existing = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
-    if (existing) {
-      logger.error(`Username already exists: ${username}`);
-      return JSON.stringify({ type: 'error', message: 'Username already exists' })
-    }
+    return (async () => {
+      const existing = await User.findOne({ username });
+      if (existing) {
+        logger.error(`Username already exists: ${username}`);
+        return JSON.stringify({ type: 'error', message: 'Username already exists' });
+      }
 
-    const hashed = bcrypt.hashSync(password, 10);
-    db.prepare('INSERT INTO users (username, password) VALUES (?, ?)').run(username, hashed);
+      const hashed = bcrypt.hashSync(password, 10);
+      // Always create with uuid array
+      await User.create({ username, password: hashed, uuid: [uuid] });
 
-    const token = jwt.sign({ username }, JWT_SECRET, { expiresIn: '1h' });
-    db.prepare('INSERT INTO tokens (uuid, username, token) VALUES (?, ?, ?)').run(uuid, username, token);
-    return JSON.stringify({ type: 'success', message: 'User registered', token })
+      const token = jwt.sign({ username }, JWT_SECRET, { expiresIn: '1h' });
+      await Token.create({ uuid, token, created_at: new Date() });
+      return JSON.stringify({ type: 'success', message: 'User registered', token });
+    })();
   }
 
   if (type === 'login') {
-    logger.info(`Login attempt for username: ${username}`);
-    const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
+    return (async () => {
+      logger.info(`Login attempt for username: ${username}`);
+      const user = await User.findOne({ username });
 
-    if (!user || !bcrypt.compareSync(password, user.password)) {
-      logger.error(`Invalid credentials for username: ${username}`);
-      return JSON.stringify({ type: 'error', message: 'Invalid credentials' })
-    }
+      if (!user || !bcrypt.compareSync(password, user.password)) {
+        logger.error(`Invalid credentials for username: ${username}`);
+        return JSON.stringify({ type: 'error', message: 'Invalid credentials' });
+      }
 
-    const token = jwt.sign({ username }, JWT_SECRET, { expiresIn: TTL });
-    db.prepare('INSERT INTO tokens (uuid, token, issued_at, expires_at) VALUES (?, ?, ?, ?)').run(
-      uuid,
-      token,
-      Date.now(),
-      Date.now() + TTL
-    );
-    return JSON.stringify({ type: 'success', message: 'Login successful', token });
+      // Automically update uuid array using findOneAndUpdate
+      let uuids = Array.isArray(user.uuid) ? user.uuid : [];
+      if (!uuids.includes(uuid)) {
+        if (uuids.length >= 3) {
+          logger.error(`Binding limit reached for username: ${username}`);
+          await User.findOneAndUpdate(
+            { username },
+            { $set: { uuid: uuids } },
+            { new: true }
+          );
+          return JSON.stringify({ type: 'error', message: 'Exceeded Device Binding Limit' });
+        }
+        uuids.push(uuid);
+      }
+      await User.findOneAndUpdate(
+        { username },
+        { $set: { uuid: uuids } },
+        { new: true }
+      );
+
+      const token = jwt.sign({ username }, JWT_SECRET, { expiresIn: TTL });
+      await Token.create({ uuid, token, created_at: new Date() });
+      return JSON.stringify({ type: 'success', message: 'Login successful', token });
+    })();
   }
 
   logger.error(`Unknown message type: ${type}`);

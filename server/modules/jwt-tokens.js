@@ -1,48 +1,39 @@
-import db from "./db.js";
+import { Token } from "./db.js";
+import jwt from "jsonwebtoken";
 
-const SECRET = process.env.JWT_SECRET
+const SECRET = process.env.JWT_SECRET;
 
-export function storeToken(uuid, token, ttlSeconds = 3600) {
-  const now = Math.floor(Date.now() / 1000);
-  const expires = now + ttlSeconds;
-
-  db.run(
-    "INSERT INTO tokens (uuid, token, issued_at, expires_at) VALUES (?, ?, ?, ?)",
-    uuid, token, now, expires
-  );
+export async function storeToken(uuid, token, ttlSeconds = 3600) {
+  const expires = new Date(Date.now() + ttlSeconds * 1000);
+  await Token.create({ uuid, token, created_at: new Date(), expires_at: expires });
 }
 
-export function getToken(token) {
-  return db.query("SELECT * FROM tokens WHERE token = ?").get(token);
+export async function getToken(token) {
+  return await Token.findOne({ token });
 }
 
-export function getTokensByUUID(uuid) {
-  return db.query("SELECT * FROM tokens WHERE uuid = ?").all(uuid);
+export async function getTokensByUUID(uuid) {
+  return await Token.find({ uuid });
 }
 
-export function revokeToken(token) {
-  db.run("DELETE FROM tokens WHERE token = ?", token);
+export async function revokeToken(token) {
+  await Token.deleteOne({ token });
 }
 
-export function revokeAllTokens(uuid) {
-  db.run("DELETE FROM tokens WHERE uuid = ?", uuid);
+export async function revokeAllTokens(uuid) {
+  await Token.deleteMany({ uuid });
 }
 
-export function cleanExpiredTokens() {
-  const now = Math.floor(Date.now() / 1000);
-  db.run("DELETE FROM tokens WHERE expires_at < ?", now);
+export async function cleanExpiredTokens() {
+  await Token.deleteMany({ expires_at: { $lt: new Date() } });
 }
 
-export function verifyToken(token) {
+export async function verifyToken(token) {
   try {
     const payload = jwt.verify(token, SECRET);
-    const record = db.query("SELECT * FROM tokens WHERE token = ?").get(token);
-
+    const record = await Token.findOne({ token });
     if (!record || record.uuid !== payload.uuid) return null;
-
-    const now = Math.floor(Date.now() / 1000);
-    if (record.expires_at < now) return null;
-
+    if (record.expires_at && record.expires_at < new Date()) return null;
     return payload;
   } catch (err) {
     return null;

@@ -1,19 +1,19 @@
-import Database from "better-sqlite3";
-const db = new Database("users.db", { create: true });
+import mongoose from 'mongoose';
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE,
-    password TEXT
-  );
+const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://fierra:zIQ0krX44C2B0ElT@hitbox.ofl8kib.mongodb.net';
+mongoose.connect(MONGO_URI);
 
-  CREATE TABLE IF NOT EXISTS tokens (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    uuid TEXT,
-    token TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  );
-`);
+const userSchema = new mongoose.Schema({
+  username: { type: String, unique: true, required: true },
+  password: { type: String, required: true },
+  uuid: { type: [String], default: [] },
+}, { collection: 'users' });
 
-export default db;
+const tokenSchema = new mongoose.Schema({
+  uuid: { type: String, required: true },
+  token: { type: String, required: true },
+  created_at: { type: Date, default: Date.now },
+}, { collection: 'tokens' });
+
+export const User = mongoose.model('User', userSchema);
+export const Token = mongoose.model('Token', tokenSchema);
